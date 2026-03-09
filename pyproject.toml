@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "neosec"
+version = "0.1.0"
+description = "网络安全测试工具集 - 工作流自动化 CLI 工具"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "neosec", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+typer = {extras = ["all"], version = "^0.12.0"}
+rich = "^13.7.0"
+pyyaml = "^6.0.1"
+aiofiles = "^23.2.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+black = "^24.0.0"
+ruff = "^0.2.0"
+
+[tool.poetry.scripts]
+neosec = "neosec.cli.main:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

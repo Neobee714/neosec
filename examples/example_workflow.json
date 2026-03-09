@@ -1,0 +1,100 @@
+{
+  "name": "example_workflow",
+  "description": "示例工作流 - 演示所有功能",
+  "version": "1.0.0",
+  "variables": {
+    "target": "example.com",
+    "wordlist": "/usr/share/wordlists/dirb/common.txt"
+  },
+  "steps": [
+    {
+      "id": "info_gathering",
+      "order": 1,
+      "name": "信息收集",
+      "tool": "echo",
+      "args": {
+        "message": "开始扫描目标: {{target}}"
+      },
+      "save_result_as": "info",
+      "timeout": 10,
+      "retry": 0,
+      "continue_on_error": false
+    },
+    {
+      "id": "port_scan",
+      "order": 2,
+      "name": "端口扫描",
+      "tool": "nmap",
+      "args": {
+        "-sV": true,
+        "-p": "1-1000",
+        "target": "{{target}}"
+      },
+      "save_result_as": "port_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": false
+    },
+    {
+      "id": "subdomain_enum",
+      "order": 3,
+      "parallel_group": "recon",
+      "name": "子域名枚举",
+      "tool": "subfinder",
+      "args": {
+        "-d": "{{target}}"
+      },
+      "save_result_as": "subdomain_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "dns_enum",
+      "order": 3,
+      "parallel_group": "recon",
+      "name": "DNS 枚举",
+      "tool": "dnsenum",
+      "args": {
+        "domain": "{{target}}"
+      },
+      "save_result_as": "dns_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "web_scan",
+      "order": 4,
+      "name": "Web 目录扫描",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains_any",
+        "source": "port_scan_result.open_ports",
+        "values": [80, 443, 8080]
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "http://{{target}}/FUZZ"
+      },
+      "save_result_as": "web_scan_result",
+      "timeout": 600,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "report",
+      "order": 5,
+      "name": "生成报告",
+      "depends_on": ["port_scan", "subdomain_enum", "dns_enum"],
+      "tool": "echo",
+      "args": {
+        "message": "扫描完成，结果已保存"
+      },
+      "timeout": 10,
+      "retry": 0,
+      "continue_on_error": false
+    }
+  ]
+}

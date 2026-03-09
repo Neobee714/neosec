@@ -1,0 +1,53 @@
+{
+  "name": "sequential_workflow",
+  "description": "按顺序执行工具的基础工作流",
+  "version": "2.0.0",
+  "variables": {
+    "target": "example.com",
+    "wordlist": "/usr/share/wordlists/dirb/common.txt"
+  },
+  "steps": [
+    {
+      "id": "port_scan",
+      "order": 1,
+      "name": "端口扫描",
+      "tool": "nmap",
+      "args": {
+        "-sV": true,
+        "target": "{{target}}"
+      },
+      "save_result_as": "port_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": false
+    },
+    {
+      "id": "dir_scan",
+      "order": 2,
+      "name": "目录扫描",
+      "tool": "ffuf",
+      "depends_on": ["port_scan"],
+      "args": {
+        "--wordlist": "{{wordlist}}",
+        "target": "{{target}}"
+      },
+      "save_result_as": "dir_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "save_result",
+      "order": 3,
+      "name": "保存结果",
+      "tool": "save_json",
+      "depends_on": ["port_scan", "dir_scan"],
+      "args": {
+        "output": "./result.json"
+      },
+      "timeout": 60,
+      "retry": 0,
+      "continue_on_error": false
+    }
+  ]
+}

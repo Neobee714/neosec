@@ -1,0 +1,91 @@
+{
+  "name": "data_passing_workflow",
+  "description": "演示步骤间数据传递的工作流",
+  "version": "2.0.0",
+  "variables": {
+    "target": "example.com",
+    "wordlist": "/usr/share/wordlists/dirb/common.txt"
+  },
+  "steps": [
+    {
+      "id": "port_scan",
+      "order": 1,
+      "name": "端口扫描",
+      "tool": "nmap",
+      "args": {
+        "-sV": true,
+        "target": "{{target}}"
+      },
+      "save_result_as": "port_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": false
+    },
+    {
+      "id": "extract_http_ports",
+      "order": 2,
+      "name": "提取 HTTP 端口",
+      "tool": "filter",
+      "depends_on": ["port_scan"],
+      "args": {
+        "input": "{{port_scan_result.open_ports}}",
+        "filter": "service in ['http', 'https']"
+      },
+      "save_result_as": "http_ports",
+      "timeout": 10,
+      "retry": 0,
+      "continue_on_error": false
+    },
+    {
+      "id": "web_scan_per_port",
+      "order": 3,
+      "name": "针对每个 HTTP 端口扫描",
+      "tool": "ffuf",
+      "depends_on": ["extract_http_ports"],
+      "for_each": "{{http_ports}}",
+      "args": {
+        "--wordlist": "{{wordlist}}",
+        "target": "{{target}}",
+        "port": "{{item.port}}"
+      },
+      "save_result_as": "web_scan_results",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "vulnerability_check",
+      "order": 4,
+      "name": "漏洞检查",
+      "tool": "nuclei",
+      "depends_on": ["web_scan_per_port"],
+      "args": {
+        "target": "{{target}}",
+        "urls": "{{web_scan_results.discovered_urls}}",
+        "severity": ["critical", "high"]
+      },
+      "save_result_as": "vuln_result",
+      "timeout": 600,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "generate_report",
+      "order": 5,
+      "name": "生成报告",
+      "tool": "reporter",
+      "depends_on": ["port_scan", "web_scan_per_port", "vulnerability_check"],
+      "args": {
+        "target": "{{target}}",
+        "port_scan": "{{port_scan_result}}",
+        "web_scan": "{{web_scan_results}}",
+        "vulnerabilities": "{{vuln_result}}",
+        "format": "html",
+        "output": "./reports/{{target}}_report.html"
+      },
+      "timeout": 60,
+      "retry": 0,
+      "continue_on_error": false
+    }
+  ]
+}

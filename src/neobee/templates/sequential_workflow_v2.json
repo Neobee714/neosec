@@ -1,0 +1,56 @@
+{
+  "name": "sequential_workflow_v2",
+  "description": "带超时、重试和错误控制的顺序执行工作流",
+  "version": "2.0.0",
+  "variables": {
+    "target": "example.com",
+    "wordlist": "/usr/share/wordlists/dirb/common.txt"
+  },
+  "steps": [
+    {
+      "id": "port_scan",
+      "order": 1,
+      "name": "端口扫描",
+      "tool": "nmap",
+      "args": {
+        "-sC": true,
+        "-sV": true,
+        "target": "{{target}}"
+      },
+      "save_result_as": "port_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": false
+    },
+    {
+      "id": "web_scan",
+      "order": 2,
+      "name": "目录扫描",
+      "tool": "ffuf",
+      "depends_on": ["port_scan"],
+      "args": {
+        "--wordlist": "{{wordlist}}",
+        "target": "{{target}}"
+      },
+      "save_result_as": "web_scan_result",
+      "timeout": 300,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "report",
+      "order": 3,
+      "name": "生成报告",
+      "tool": "reporter",
+      "depends_on": ["port_scan", "web_scan"],
+      "args": {
+        "target": "{{target}}",
+        "format": "json",
+        "output": "./reports/{{target}}_report.json"
+      },
+      "timeout": 60,
+      "retry": 0,
+      "continue_on_error": false
+    }
+  ]
+}
