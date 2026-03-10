@@ -11,7 +11,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/yourusername/neosec.git
+git clone https://github.com/Neobee714/neosec.git
 cd neosec
 
 # 2. 安装依赖
@@ -28,7 +28,7 @@ neosec --version
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/yourusername/neosec.git
+git clone https://github.com/Neobee714/neosec.git
 cd neosec
 
 # 2. 安装

@@ -2,7 +2,7 @@
 name = "neosec"
 version = "0.1.0"
 description = "Network security workflow automation CLI tool"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Neobee714 <1321247001@qq.com>"]
 readme = "README.md"
 packages = [{include = "neobee", from = "src"}]
 
