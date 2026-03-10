@@ -181,4 +181,4 @@ neosec history
 
 ---
 
-[0.1.0]: https://github.com/yourusername/neosec/releases/tag/v0.1.0
+[0.1.0]: https://github.com/Neobee714/neosec/releases/tag/v0.1.0

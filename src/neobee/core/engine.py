@@ -1,7 +1,10 @@
 """工作流执行引擎"""
 import asyncio
 import json
+import re
 import shutil
+import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -323,8 +326,15 @@ class WorkflowEngine:
         if not self.dry_run and not shutil.which(tool_path):
             raise FileNotFoundError(f"工具未找到: {tool_path}")
 
+        prepared_args = dict(args)
+        temp_nmap_xml: Optional[Path] = None
+        if tool_name == "nmap" and "-oX" not in prepared_args and "-oA" not in prepared_args:
+            with tempfile.NamedTemporaryFile(prefix="neosec_nmap_", suffix=".xml", delete=False) as tmp:
+                temp_nmap_xml = Path(tmp.name)
+            prepared_args["-oX"] = str(temp_nmap_xml)
+
         cmd = [tool_path]
-        for key, value in args.items():
+        for key, value in prepared_args.items():
             if key.startswith("-"):
                 if isinstance(value, bool):
                     if value:
@@ -354,10 +364,17 @@ class WorkflowEngine:
                     f"工具执行失败 (退出码 {process.returncode}): {stderr.decode()}"
                 )
 
-            output = stdout.decode()
+            output = stdout.decode(errors="replace")
 
             if self.verbose:
                 console.print(f"[dim]输出:[/dim]\n{output}")
+
+            if tool_name == "nmap":
+                return self._parse_nmap_result(
+                    raw_output=output,
+                    args=prepared_args,
+                    temp_xml_path=temp_nmap_xml,
+                )
 
             try:
                 return json.loads(output)
@@ -368,6 +385,158 @@ class WorkflowEngine:
             process.kill()
             await process.wait()
             raise TimeoutError(f"工具执行超时 ({timeout}秒)")
+        finally:
+            if temp_nmap_xml and temp_nmap_xml.exists():
+                try:
+                    temp_nmap_xml.unlink()
+                except OSError:
+                    pass
+
+    def _parse_nmap_result(
+        self,
+        raw_output: str,
+        args: dict[str, Any],
+        temp_xml_path: Optional[Path],
+    ) -> dict[str, Any]:
+        """解析 nmap 输出，优先使用 XML 结果并回退到文本解析。"""
+        xml_data: Optional[str] = None
+
+        ox_value = args.get("-oX")
+        if isinstance(ox_value, str):
+            if ox_value == "-":
+                xml_data = raw_output
+            elif Path(ox_value).exists():
+                xml_data = Path(ox_value).read_text(encoding="utf-8", errors="replace")
+        elif temp_xml_path and temp_xml_path.exists():
+            xml_data = temp_xml_path.read_text(encoding="utf-8", errors="replace")
+
+        if xml_data is None and "-oA" in args:
+            oa_prefix = str(args["-oA"])
+            oa_xml_path = Path(f"{oa_prefix}.xml")
+            if oa_xml_path.exists():
+                xml_data = oa_xml_path.read_text(encoding="utf-8", errors="replace")
+
+        parsed = self._parse_nmap_xml(xml_data) if xml_data else None
+        if parsed is None:
+            parsed = self._parse_nmap_text(raw_output)
+
+        return {
+            "status": "success",
+            "raw_output": raw_output,
+            **parsed,
+        }
+
+    def _parse_nmap_xml(self, xml_data: str) -> Optional[dict[str, Any]]:
+        """解析 nmap XML 并提取结构化端口与服务信息。"""
+        if not xml_data.strip():
+            return None
+
+        try:
+            root = ET.fromstring(xml_data)
+        except ET.ParseError:
+            return None
+
+        hosts: list[dict[str, Any]] = []
+        services: list[dict[str, Any]] = []
+        open_ports: list[int] = []
+
+        for host in root.findall("host"):
+            ip_address = "Unknown"
+            for addr in host.findall("address"):
+                if addr.attrib.get("addrtype") == "ipv4":
+                    ip_address = addr.attrib.get("addr", "Unknown")
+                    break
+
+            host_ports: list[dict[str, Any]] = []
+            for port in host.findall("./ports/port"):
+                port_raw = port.attrib.get("portid", "")
+                port_num = self._to_int(port_raw)
+                protocol = port.attrib.get("protocol", "")
+
+                state_node = port.find("state")
+                state = state_node.attrib.get("state", "") if state_node is not None else ""
+
+                service_node = port.find("service")
+                service_name = (
+                    service_node.attrib.get("name", "unknown")
+                    if service_node is not None
+                    else "unknown"
+                )
+                product = service_node.attrib.get("product", "") if service_node is not None else ""
+                version = service_node.attrib.get("version", "") if service_node is not None else ""
+
+                port_value: int | str = port_num if port_num is not None else port_raw
+                record = {
+                    "ip": ip_address,
+                    "port": port_value,
+                    "protocol": protocol,
+                    "state": state,
+                    "service": service_name,
+                    "product": product,
+                    "version": version,
+                }
+                host_ports.append(record)
+
+                if state == "open":
+                    services.append(record)
+                    if port_num is not None:
+                        open_ports.append(port_num)
+
+            hosts.append({"ip": ip_address, "ports": host_ports})
+
+        return {
+            "format": "nmap_xml",
+            "hosts": hosts,
+            "services": services,
+            "open_ports": sorted(set(open_ports)),
+        }
+
+    def _parse_nmap_text(self, raw_output: str) -> dict[str, Any]:
+        """回退解析 nmap 文本输出，提取开放端口与服务信息。"""
+        open_ports: list[int] = []
+        services: list[dict[str, Any]] = []
+
+        host_match = re.search(r"Nmap scan report for\s+([^\r\n]+)", raw_output)
+        host_name = host_match.group(1).strip() if host_match else "Unknown"
+
+        port_pattern = re.compile(r"^(\d+)\/(tcp|udp)\s+open(?:\s+(\S+))?(?:\s+(.*))?$")
+        for line in raw_output.splitlines():
+            match = port_pattern.match(line.strip())
+            if not match:
+                continue
+
+            port = int(match.group(1))
+            protocol = match.group(2)
+            service = match.group(3) or "unknown"
+            version = (match.group(4) or "").strip()
+
+            open_ports.append(port)
+            services.append(
+                {
+                    "ip": host_name,
+                    "port": port,
+                    "protocol": protocol,
+                    "state": "open",
+                    "service": service,
+                    "product": "",
+                    "version": version,
+                }
+            )
+
+        return {
+            "format": "nmap_text",
+            "hosts": [{"ip": host_name, "ports": services}],
+            "services": services,
+            "open_ports": sorted(set(open_ports)),
+        }
+
+    @staticmethod
+    def _to_int(value: Any) -> Optional[int]:
+        """安全转换为整数。"""
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            return None
 
     def _generate_result(self, template: dict[str, Any]) -> dict[str, Any]:
         """生成执行结果。"""

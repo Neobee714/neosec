@@ -1,0 +1,169 @@
+{
+  "name": "nmap_ffuf_workflow",
+  "description": "Nmap绔彛鎵弿鍚庡Web绔彛杩涜ffuf鐩綍鐖嗙牬",
+  "version": "1.0.0",
+  "variables": {
+    "target": "",
+    "wordlist": "/usr/share/wordlists/dirb/common.txt",
+    "nmap_ports": "1-10000",
+    "ffuf_threads": "40"
+  },
+  "steps": [  
+    {
+      "id": "port_scan",
+      "order": 1,
+      "name": "Nmap绔彛鎵弿",
+      "tool": "nmap",
+      "args": {
+        "-sV": true,
+        "-sC": true,
+        "-p": "{{nmap_ports}}",
+        "-T4": true,
+        "--open": true,
+        "target": "{{target}}"
+      },
+      "save_result_as": "port_scan_result",
+      "timeout": 600,
+      "retry": 1,
+      "continue_on_error": false
+    },
+    {
+      "id": "ffuf_port_80",
+      "order": 2,
+      "name": "HTTP(80)鐩綍鐖嗙牬",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains",
+        "source": "port_scan_result.open_ports",
+        "value": 80
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "http://{{target}}/FUZZ",
+        "-t": "{{ffuf_threads}}",
+        "-mc": "200,204,301,302,307,401,403",
+        "-fc": "404",
+        "-o": "ffuf_80_result.json",
+        "-of": "json"
+      },
+      "save_result_as": "ffuf_80_result",
+      "timeout": 900,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "ffuf_port_443",
+      "order": 2,
+      "name": "HTTPS(443)鐩綍鐖嗙牬",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains",
+        "source": "port_scan_result.open_ports",
+        "value": 443
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "https://{{target}}/FUZZ",
+        "-t": "{{ffuf_threads}}",
+        "-mc": "200,204,301,302,307,401,403",
+        "-fc": "404",
+        "-o": "ffuf_443_result.json",
+        "-of": "json"
+      },
+      "save_result_as": "ffuf_443_result",
+      "timeout": 900,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "ffuf_port_8080",
+      "order": 2,
+      "name": "HTTP(8080)鐩綍鐖嗙牬",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains",
+        "source": "port_scan_result.open_ports",
+        "value": 8080
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "http://{{target}}:8080/FUZZ",
+        "-t": "{{ffuf_threads}}",
+        "-mc": "200,204,301,302,307,401,403",
+        "-fc": "404",
+        "-o": "ffuf_8080_result.json",
+        "-of": "json"
+      },
+      "save_result_as": "ffuf_8080_result",
+      "timeout": 900,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "ffuf_port_8000",
+      "order": 2,
+      "name": "HTTP(8000)鐩綍鐖嗙牬",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains",
+        "source": "port_scan_result.open_ports",
+        "value": 8000
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "http://{{target}}:8000/FUZZ",
+        "-t": "{{ffuf_threads}}",
+        "-mc": "200,204,301,302,307,401,403",
+        "-fc": "404",
+        "-o": "ffuf_8000_result.json",
+        "-of": "json"
+      },
+      "save_result_as": "ffuf_8000_result",
+      "timeout": 900,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "ffuf_port_8888",
+      "order": 2,
+      "name": "HTTP(8888)鐩綍鐖嗙牬",
+      "depends_on": ["port_scan"],
+      "when": {
+        "type": "contains",
+        "source": "port_scan_result.open_ports",
+        "value": 8888
+      },
+      "tool": "ffuf",
+      "args": {
+        "-w": "{{wordlist}}",
+        "-u": "http://{{target}}:8888/FUZZ",
+        "-t": "{{ffuf_threads}}",
+        "-mc": "200,204,301,302,307,401,403",
+        "-fc": "404",
+        "-o": "ffuf_8888_result.json",
+        "-of": "json"
+      },
+      "save_result_as": "ffuf_8888_result",
+      "timeout": 900,
+      "retry": 1,
+      "continue_on_error": true
+    },
+    {
+      "id": "summary",
+      "order": 3,
+      "name": "鐢熸垚鎵弿鎽樿",
+      "depends_on": ["port_scan"],
+      "tool": "echo",
+      "args": {
+        "message": "鎵弿瀹屾垚 - 鐩爣: {{target}}"
+      },
+      "timeout": 10,
+      "retry": 0,
+      "continue_on_error": false
+    }
+  ]
+}
