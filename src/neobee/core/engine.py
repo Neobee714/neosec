@@ -1,4 +1,4 @@
-"""工作流执行引擎"""
+﻿"""工作流执行引擎"""
 import asyncio
 import json
 import os
@@ -67,7 +67,9 @@ class WorkflowEngine:
         self._init_context(template, variables)
 
         # Set output directory early so tools can write files there
-        if output_file:
+        # Only set _output_dir when the user explicitly provided --output;
+        # default "./workflow_result.json" should NOT redirect tool output to cwd.
+        if output_file and Path(output_file).parent != Path("."):
             self._output_dir = str(Path(output_file).parent)
 
         start_time = datetime.now()
@@ -490,9 +492,9 @@ class WorkflowEngine:
             f"Status counts: {status_text}",
         ]
 
-        report_md = result.get("report_markdown")
-        if report_md:
-            lines.append(f"Readable report: {report_md}")
+        report_txt = result.get("report_txt")
+        if report_txt:
+            lines.append(f"Readable report: {report_txt}")
 
         max_items = 20
         col = f"{"PATH":<38} {"ST":>4}  {"SIZE":>7}  {"MS(ms)":>8}  REDIRECT"
@@ -566,14 +568,14 @@ class WorkflowEngine:
         result["scan_time"] = data.get("time", "")
         result["entries"] = entries
 
-        md_path = self._write_ffuf_markdown(json_path, result)
-        if md_path is not None:
-            result["report_markdown"] = str(md_path.resolve())
+        txt_path = self._write_ffuf_txt(json_path, result)
+        if txt_path is not None:
+            result["report_txt"] = str(txt_path.resolve())
 
         return result
 
-    def _write_ffuf_markdown(self, json_path: Path, result: dict[str, Any]) -> Optional[Path]:
-        """将 ffuf 结果写成 Markdown，便于用户阅读。"""
+    def _write_ffuf_txt(self, json_path: Path, result: dict[str, Any]) -> Optional[Path]:
+        """将 ffuf 结果写成纯文本，便于 cat/less 阅读。"""
         entries = result.get("entries", [])
         if not isinstance(entries, list):
             return None
@@ -584,47 +586,30 @@ class WorkflowEngine:
             if isinstance(status, int):
                 status_counts[status] = status_counts.get(status, 0) + 1
 
-        md_lines = [
-            "# FFUF 扫描结果",
-            "",
-            f"- 原始结果文件: `{json_path.name}`",
-            f"- 扫描时间: `{result.get('scan_time', '')}`",
-            f"- 命中数量: `{len(entries)}`",
-        ]
-
+        lines = []
         commandline = result.get("commandline", "")
         if commandline:
-            md_lines.append(f"- 命令: `{commandline}`")
-
-        md_lines.extend(["", "## 状态码分布", "", "| 状态码 | 数量 |", "|---|---:|"])
-        if status_counts:
-            for code, count in sorted(status_counts.items()):
-                md_lines.append(f"| {code} | {count} |")
-        else:
-            md_lines.append("| - | 0 |")
-
-        md_lines.extend(
-            [
-                "",
-                "## 发现条目",
-                "",
-                "| 路径 | 状态 | 大小 | Words | Lines | 耗时(ms) | 重定向 |",
-                "|---|---:|---:|---:|---:|---:|---|",
-            ]
-        )
-
+            lines.append(f"$ {commandline}")
+            lines.append("-" * 72)
+        lines.append(f"扫描时间  : {result.get('scan_time', '')}")
+        lines.append(f"命中数量  : {len(entries)}")
+        dist = "  ".join(f"{code}:{cnt}" for code, cnt in sorted(status_counts.items()))
+        lines.append(f"状态码    : {dist or '-'}")
+        lines.append("")
+        col = f"{"PATH":<40} {"ST":>4}  {"SIZE":>7}  {"MS(ms)":>8}  REDIRECT"
+        lines.append(col)
+        lines.append("-" * 72)
         for entry in entries:
-            path = str(entry.get("path", "/")).replace("|", "\\|")
-            redirect = str(entry.get("redirectlocation", "")).replace("|", "\\|")
-            md_lines.append(
-                f"| {path} | {entry.get('status', '-')} | {entry.get('length', '-')} | "
-                f"{entry.get('words', '-')} | {entry.get('lines', '-')} | "
-                f"{entry.get('duration_ms', '-')} | {redirect} |"
-            )
+            p = str(entry.get("path", "/"))[:40]
+            st = str(entry.get("status", "-"))
+            sz = str(entry.get("length", "-"))
+            ms = str(entry.get("duration_ms", "-"))
+            rd = str(entry.get("redirectlocation", ""))
+            lines.append(f"{p:<40} {st:>4}  {sz:>7}  {ms:>8}  {rd}")
 
-        md_path = json_path.with_suffix(".md")
-        md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-        return md_path
+        txt_path = json_path.with_suffix(".txt")
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return txt_path
     def _clean_console_output(self, raw_output: str) -> str:
         """清洗工具输出中的控制字符，便于终端阅读。"""
         text = raw_output.replace("\r\n", "\n").replace("\r", "\n")
@@ -791,7 +776,10 @@ class WorkflowEngine:
         # For ffuf: redirect -o JSON to result_dir so entries are parsed
         # and the file lands in the right place (not cwd)
         if tool_name == "ffuf":
-            ffuf_out_dir = Path(self._output_dir) if self._output_dir else self._get_result_dir()
+            _od = Path(self._output_dir) if self._output_dir else None
+            if _od is not None and _od.resolve() == Path.cwd().resolve():
+                _od = None
+            ffuf_out_dir = _od if _od is not None else self._get_result_dir()
             if ffuf_out_dir:
                 ffuf_json_name = str(Path(str(prepared_args.get("-o", "ffuf_result.json"))).name)
                 prepared_args["-o"] = str(ffuf_out_dir / ffuf_json_name)
@@ -1072,21 +1060,18 @@ class WorkflowEngine:
         }
 
     def _save_result(self, result: dict[str, Any], output_file: str) -> None:
-        """保存执行结果到指定路径，同时也保存一份到 ~/.neosec/result/<ip>/。"""
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-
-        if not self.quiet:
-            console.print(f"[green]✓[/green] 结果已保存: {output_path}")
-
-        # Also save to ~/.neosec/result/<ip>/
+        """保存执行结果到 ~/.neosec/result/<ip>/，不在当前目录生成文件。"""
         result_dir = self._get_result_dir()
         if result_dir:
             canon = result_dir / "workflow_result.json"
             with open(canon, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             if not self.quiet:
-                console.print(f"[green]✓[/green] 结果也保存至: {canon}")
+                console.print(f"[green]✓[/green] 结果已保存: {canon}")
+        else:
+            output_path = Path(output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            if not self.quiet:
+                console.print(f"[green]✓[/green] 结果已保存: {output_path}")

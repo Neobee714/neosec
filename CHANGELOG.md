@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to this project will be documented in this file.
 
@@ -8,15 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- subfinder 子域名枚举模板
-- nuclei 漏洞扫描集成
-- Web UI 界面
+- 优化用户输入体验
 
 ---
 
-## [0.1.2] - 2026-03-11
+
+## [0.1.1] - 2026-03-11
 
 ### Added
+- **结构化输出目录** — 所有工具输出与结果统一归档至 `~/.neosec/result/<ip>/`，当前工作目录保持干净
+  - `port_scan.txt` — nmap 原始 stdout（已过滤 SF 指纹 / HTTP 响应体噪声 / `service unrecognized` 提示行）
+  - `ffuf_port_<port>.txt` — ffuf 原始 stdout
+  - `ffuf_<port>_result.json` — ffuf JSON 结构化数据
+  - `ffuf_<port>_result.txt` — ffuf 可读纯文本报告（含命令行、状态码分布、命中条目表）
+  - `workflow_result.json` — 工作流执行汇总（JSON）
+- **ffuf 纯文本报告**（`.txt`）— 替代原有 Markdown 报告，可直接 `cat` / `less` 阅读
+  - 包含：原始命令行、扫描时间、命中数量、状态码分布、对齐列表（PATH / STATUS / SIZE / MS / REDIRECT）
+- **`--report` Markdown 报告增强**
+  - 端口服务表（端口 / 协议 / 服务 / 版本信息）
+  - ffuf 命中条目直接嵌入（含状态码分布徽章）
+  - 执行步骤耗时汇总
+  - 跳过步骤说明（含端口未开放原因）
+- **nmap 输出清洗** — 自动过滤 SF 指纹行、`fingerprint-strings` HTTP 响应体、`service unrecognized despite` 提示行
+- **`nmap_ffuf_workflow.json`** — Nmap 端口扫描 + ffuf 多端口目录爆破内置模板（80 / 443 / 8080 / 8000 / 8888）
 - **脚本插件机制** — 在 `~/.neosec/scripts/` 或 `neobee/scripts/` 放置脚本即可扩展新工具
   - 查找优先级：用户目录 > 内置目录
   - 支持语言：`.py` `.sh` `.rb` `.js` `.pl` `.php` 及可执行文件
@@ -29,33 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 新增依赖：`beautifulsoup4 ^4.12`、`httpx ^0.27`
 
 ### Changed
-- ffuf `-o` 自动重定向到 `result_dir`，确保 entries 解析正确且文件整齐归档
-- 脚本插件步骤跳过 `_save_tool_stdout`，避免覆盖插件自己写入的输出文件
-
----
-
-## [0.1.1] - 2026-03-11
-
-### Added
-- **结构化输出目录** — 所有结果统一保存至 `~/.neosec/result/<ip>/`
-  - `port_scan.txt` — nmap 原始 stdout（过滤 SF 指纹/HTTP 响应体噪声）
-  - `ffuf_port_<port>.txt` — ffuf 原始 stdout
-  - `summary.txt` — 工作流摘要
-  - `workflow_result.json` — 结构化结果（同时保存到 `--output` 路径）
-- **Markdown 报告优化**（`--report`）
-  - 端口服务表（端口/协议/服务/版本）
-  - ffuf 结果直接嵌入原始 stdout（代码块格式）
-  - 执行步骤耗时汇总
-  - 跳过步骤说明（含具体原因）
-- **nmap 输出过滤** — 自动去除 SF 指纹数据、`fingerprint-strings` HTTP 响应体、`service unrecognized` 提示行
-- **`nmap_ffuf_workflow.json`** — Nmap 端口扫描 + ffuf 多端口目录爆破内置模板
-
-### Changed
+- **ffuf 输出文件重定向** — `-o` 路径强制指向 `result_dir`，不再落入当前工作目录；仅当用户显式指定 `--output` 至非 cwd 目录时才跟随该目录
+- **`workflow_result.json` 仅保存到 `result_dir`** — 不再在 cwd 生成副本，消除工作目录污染
+- **ffuf 报告格式** — 由 `.md` Markdown 改为 `.txt` 纯文本，与其他工具输出格式统一
 - `workflow_result.json` 移除噪声字段：`raw_output`、`format`、`hosts`
 - 跳过的步骤不再写入 JSON 输出，减少冗余数据
-- 跳过步骤的 `error` 字段改为 `null`（原为 `"condition not met"`）
-- ffuf stdout 输出显示表格式命中结果
-- nmap verbose 输出显示按服务分行的端口摘要
+- 跳过步骤的 `error` 字段置为 `null`（原为 `"condition not met"`）
+- verbose 模式下 ffuf 输出改为对齐列表摘要，nmap 输出改为按服务分行的端口摘要
+- ffuf `-o` 自动重定向到 `result_dir`，确保 entries 解析正确且文件整齐归档
+- 脚本插件步骤跳过 `_save_tool_stdout`，避免覆盖插件自己写入的输出文件
 
 ---
 
