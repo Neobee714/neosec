@@ -40,6 +40,7 @@ class WorkflowEngine:
         }
 
         self.steps_status: dict[str, dict[str, Any]] = {}
+        self._output_dir: Optional[str] = None
         self._ansi_escape_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
         self._non_printable_re = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -51,6 +52,10 @@ class WorkflowEngine:
     ) -> dict[str, Any]:
         """执行工作流"""
         self._init_context(template, variables)
+
+        # Set output directory early so tools can write files there
+        if output_file:
+            self._output_dir = str(Path(output_file).parent)
 
         start_time = datetime.now()
         self.context["metadata"]["start_time"] = start_time.isoformat()
@@ -153,16 +158,16 @@ class WorkflowEngine:
 
         if not self._check_dependencies(resolved_step):
             self.steps_status[step_id]["status"] = "skipped"
-            self.steps_status[step_id]["error"] = "dependency failed"
+            self.steps_status[step_id]["error"] = None
             if self.verbose:
-                console.print(f"[yellow]⊘[/yellow] {step_name} - 跳过（依赖失败）")
+                console.print(f"[yellow]⊘ SKIP[/yellow]  {step_name} [dim](依赖失败)[/dim]")
             return
 
         if not self._check_condition(resolved_step):
             self.steps_status[step_id]["status"] = "skipped"
-            self.steps_status[step_id]["error"] = "condition not met"
+            self.steps_status[step_id]["error"] = None
             if self.verbose:
-                console.print(f"[yellow]⊘[/yellow] {step_name} - 跳过（条件不满足）")
+                console.print(f"[yellow]⊘ SKIP[/yellow]  {step_name} [dim](端口未开放)[/dim]")
             return
 
         start_time = datetime.now()
@@ -170,7 +175,7 @@ class WorkflowEngine:
         self.steps_status[step_id]["status"] = "running"
 
         if self.verbose:
-            console.print(f"[blue]▶[/blue] {step_name} - 执行中...")
+            console.print(f"[blue]▶ RUN[/blue]   {step_name}")
 
         try:
             if "for_each" in raw_step:
@@ -179,16 +184,17 @@ class WorkflowEngine:
                 result = await self._run_with_retry(resolved_step, step_name)
 
             end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
             self.steps_status[step_id]["status"] = "success"
             self.steps_status[step_id]["end_time"] = end_time.isoformat()
-            self.steps_status[step_id]["duration"] = (end_time - start_time).total_seconds()
+            self.steps_status[step_id]["duration"] = duration
             self.steps_status[step_id]["result"] = result
 
             if "save_result_as" in resolved_step:
                 self.context["results"][resolved_step["save_result_as"]] = result
 
             if self.verbose:
-                console.print(f"[green]✓[/green] {step_name} - 完成")
+                console.print(f"[green]✓ DONE[/green]  {step_name} [dim]({duration:.1f}s)[/dim]")
 
         except Exception as e:
             end_time = datetime.now()
@@ -198,7 +204,7 @@ class WorkflowEngine:
             self.steps_status[step_id]["error"] = str(e)
 
             if self.verbose or not self.quiet:
-                console.print(f"[red]✗[/red] {step_name} - 失败: {e}")
+                console.print(f"[red]✗ FAIL[/red]  {step_name} — {e}")
 
             if not resolved_step.get("continue_on_error", False):
                 raise
@@ -211,7 +217,7 @@ class WorkflowEngine:
             try:
                 if attempt > 0:
                     if self.verbose or not self.quiet:
-                        console.print(f"[yellow]↻[/yellow] {step_name} - 重试 {attempt}/{retry_count}")
+                        console.print(f"[yellow]↻ RETRY[/yellow] {step_name} [{attempt}/{retry_count}]")
                     await asyncio.sleep(5)
 
                 return await self._run_tool(step)
@@ -317,25 +323,54 @@ class WorkflowEngine:
 
         return results
 
-    def _print_command(self, cmd: list[str]) -> None:
-        """打印命令，避免过长行与控制字符污染。"""
-        if not (self.verbose or self.dry_run):
+    def _get_result_dir(self) -> Optional[Path]:
+        """返回 ~/.neosec/result/<ip>/ 目录，按需创建。"""
+        target = self.context.get("variables", {}).get("target")
+        if not target:
+            return None
+        result_dir = Path.home() / ".neosec" / "result" / str(target)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        return result_dir
+
+    def _save_tool_stdout(self, step: dict, tool_name: str, cmd: list[str], output: str) -> None:
+        """将工具的原始 stdout 保存为可读文本文件。"""
+        result_dir = self._get_result_dir()
+        if not result_dir or self.dry_run:
+            return
+        # Build filename from step id, e.g. port_scan.txt, ffuf_port_80.txt
+        step_id = step.get("id", tool_name)
+        filename = f"{step_id}.txt"
+        out_path = result_dir / filename
+        # Write: command header + stdout
+        header = "$ " + " ".join(cmd) + "\n" + "-" * 72 + "\n"
+        cleaned = self._clean_console_output(output)
+        out_path.write_text(header + cleaned + "\n", encoding="utf-8")
+
+    def _print_step_block(self, step_name: str, cmd: list[str], tool_name: str, raw_output: str, result: dict[str, Any]) -> None:
+        """以原子块方式打印步骤命令和输出，避免并行交错。"""
+        if not self.verbose and not self.dry_run:
             return
 
-        console.print("[dim]命令:[/dim]")
-        console.print(f"  {' '.join(cmd)}", markup=False)
+        lines: list[str] = []
+        lines.append(f"  ╔══ {step_name}")
+        lines.append(f"  ║  $ {' '.join(cmd)}")
+
+        if self.verbose and not self.dry_run:
+            summary = self._summarize_tool_output(tool_name, raw_output, result)
+            if summary:
+                for ln in summary.splitlines():
+                    lines.append(f"  ║  {ln}")
+
+        lines.append(f"  ╚══")
+        console.print("\n".join(lines), markup=False)
+
+    def _print_command(self, cmd: list[str]) -> None:
+        """兼容旧调用，不再直接打印（由 _print_step_block 统一输出）。"""
+        pass
 
     def _print_tool_output(self, tool_name: str, raw_output: str, result: dict[str, Any]) -> None:
-        """打印工具输出摘要（verbose 模式）。"""
-        if not self.verbose:
-            return
-
-        summary = self._summarize_tool_output(tool_name, raw_output, result)
-        if not summary:
-            return
-
-        console.print("[dim]输出:[/dim]")
-        console.print(summary, markup=False)
+        """兼容旧调用，不再直接打印（由 _print_step_block 统一输出）。"""
+        pass
 
     def _summarize_tool_output(self, tool_name: str, raw_output: str, result: dict[str, Any]) -> str:
         """按工具生成可读的输出摘要。"""
@@ -352,11 +387,16 @@ class WorkflowEngine:
             else:
                 shown = "-"
 
-            return (
-                f"Open ports: {ports_text}\n"
-                f"Services: {shown}\n"
-                f"Service records: {len(services)}"
-            )
+            lines_out = [f"Open ports : {ports_text}"]
+            if services:
+                lines_out.append("Services   :")
+                for svc in services:
+                    ver = (f"{svc.get('product','')} {svc.get('version','')}").strip()
+                    ver_str = f"  [{ver}]" if ver else ""
+                    lines_out.append(
+                        f"  {svc.get('port')}/{svc.get('protocol','tcp')}"
+                        f"  {svc.get('service','unknown')}{ver_str}")
+            return "\n".join(lines_out)
 
         if tool_name == "ffuf":
             ffuf_entries = result.get("entries", [])
@@ -442,20 +482,18 @@ class WorkflowEngine:
             lines.append(f"Readable report: {report_md}")
 
         max_items = 20
+        col = f"{"PATH":<38} {"ST":>4}  {"SIZE":>7}  {"MS(ms)":>8}  REDIRECT"
+        lines.append(f"  {col}")
+        lines.append("  " + "-" * 70)
         for item in entries[:max_items]:
-            path = item.get("path", "/")
-            status = item.get("status", "-")
-            size = item.get("length", "-")
-            duration_ms = item.get("duration_ms", "-")
-            redirect = item.get("redirectlocation", "")
-            line = f"- {path} [status={status}, size={size}, duration={duration_ms}ms]"
-            if redirect:
-                line += f" -> {redirect}"
-            lines.append(line)
-
+            p = str(item.get("path", "/"))[:38]
+            st = str(item.get("status", "-"))
+            sz = str(item.get("length", "-"))
+            ms = str(item.get("duration_ms", "-"))
+            rd = str(item.get("redirectlocation", ""))
+            lines.append(f"  {p:<38} {st:>4}  {sz:>7}  {ms:>8}  {rd}")
         if len(entries) > max_items:
-            lines.append(f"... (+{len(entries) - max_items} more)")
-
+            lines.append(f"  ... (+{len(entries) - max_items} more)")
         return "\n".join(lines)
 
     def _parse_ffuf_result(self, raw_output: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -517,7 +555,7 @@ class WorkflowEngine:
 
         md_path = self._write_ffuf_markdown(json_path, result)
         if md_path is not None:
-            result["report_markdown"] = str(md_path)
+            result["report_markdown"] = str(md_path.resolve())
 
         return result
 
@@ -592,6 +630,34 @@ class WorkflowEngine:
             compact_lines.append(line)
             previous_blank = is_blank
 
+        # Strip nmap noisy blocks: SF: fingerprints and fingerprint-strings HTTP bodies
+        filtered: list[str] = []
+        in_sf_block = False
+        in_fp_block = False  # fingerprint-strings HTTP body block
+        for ln in compact_lines:
+            stripped_ln = ln.strip()
+            # Skip SF: service fingerprint lines
+            if stripped_ln.startswith("SF-Port") or stripped_ln.startswith("SF:"):
+                in_sf_block = True
+                continue
+            if in_sf_block:
+                if stripped_ln.startswith("|") or stripped_ln.startswith("SF"):
+                    continue
+                in_sf_block = False
+            # Skip fingerprint-strings HTTP body (| GetRequest:, | HTTPOptions:, etc.)
+            if stripped_ln == "| fingerprint-strings:":
+                in_fp_block = True
+                continue
+            if in_fp_block:
+                if stripped_ln.startswith("|"):
+                    continue
+                in_fp_block = False
+            # Skip "N service unrecognized" line
+            if "service unrecognized despite" in stripped_ln:
+                continue
+            filtered.append(ln)
+        compact_lines = filtered
+
         return "\n".join(compact_lines).strip()
 
     async def _run_tool(self, step: dict[str, Any]) -> dict[str, Any]:
@@ -606,6 +672,10 @@ class WorkflowEngine:
             raise FileNotFoundError(f"工具未找到: {tool_path}")
 
         prepared_args = dict(args)
+        # For ffuf, remove JSON output flags - we'll save raw stdout instead
+        if tool_name == "ffuf":
+            prepared_args.pop("-o", None)
+            prepared_args.pop("-of", None)
         temp_nmap_xml: Optional[Path] = None
         if tool_name == "nmap" and "-oX" not in prepared_args and "-oA" not in prepared_args:
             with tempfile.NamedTemporaryFile(prefix="neosec_nmap_", suffix=".xml", delete=False) as tmp:
@@ -658,7 +728,8 @@ class WorkflowEngine:
                 except json.JSONDecodeError:
                     result = {"status": "success", "raw_output": output}
 
-            self._print_tool_output(tool_name, output, result)
+            self._save_tool_stdout(step, tool_name, cmd, output)
+            self._print_step_block(step.get("name", tool_name), cmd, tool_name, output, result)
             return result
 
         except asyncio.TimeoutError:
@@ -818,21 +889,50 @@ class WorkflowEngine:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _clean_result_for_output(result: Any) -> Any:
+        """递归移除 raw_output / format / hosts 等对人类无用的噪声字段。"""
+        if not isinstance(result, dict):
+            return result
+        drop_keys = {"raw_output", "format", "hosts"}
+        cleaned = {}
+        for k, v in result.items():
+            if k in drop_keys:
+                continue
+            if isinstance(v, dict):
+                cleaned[k] = WorkflowEngine._clean_result_for_output(v)
+            elif isinstance(v, list):
+                cleaned[k] = [
+                    WorkflowEngine._clean_result_for_output(i) if isinstance(i, dict) else i
+                    for i in v
+                ]
+            else:
+                cleaned[k] = v
+        return cleaned
+
     def _generate_result(self, template: dict[str, Any]) -> dict[str, Any]:
         """生成执行结果。"""
         steps_result = []
         summary = {"total_steps": 0, "successful": 0, "failed": 0, "skipped": 0}
 
         for _, status in self.steps_status.items():
-            steps_result.append(status)
             summary["total_steps"] += 1
-
             if status["status"] == "success":
                 summary["successful"] += 1
             elif status["status"] == "failed":
                 summary["failed"] += 1
             elif status["status"] == "skipped":
                 summary["skipped"] += 1
+                continue  # omit skipped steps from output
+            # Clean up noisy fields before storing
+            clean_status = dict(status)
+            if clean_status.get("result"):
+                clean_status["result"] = self._clean_result_for_output(clean_status["result"])
+            # Drop fields that are always null/uninformative
+            for drop in ("error",):
+                if clean_status.get(drop) is None:
+                    clean_status.pop(drop, None)
+            steps_result.append(clean_status)
 
         return {
             "workflow": {
@@ -849,7 +949,7 @@ class WorkflowEngine:
         }
 
     def _save_result(self, result: dict[str, Any], output_file: str) -> None:
-        """保存执行结果。"""
+        """保存执行结果到指定路径，同时也保存一份到 ~/.neosec/result/<ip>/。"""
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -858,3 +958,12 @@ class WorkflowEngine:
 
         if not self.quiet:
             console.print(f"[green]✓[/green] 结果已保存: {output_path}")
+
+        # Also save to ~/.neosec/result/<ip>/
+        result_dir = self._get_result_dir()
+        if result_dir:
+            canon = result_dir / "workflow_result.json"
+            with open(canon, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            if not self.quiet:
+                console.print(f"[green]✓[/green] 结果也保存至: {canon}")

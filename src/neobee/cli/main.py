@@ -323,45 +323,134 @@ def _execute_workflow(
 
 
 def _generate_markdown_report(result: dict, output_file: str):
-    """生成 Markdown 报告"""
-    from datetime import datetime
-
+    """生成包含扫描结果的完整 Markdown 报告"""
     report_path = Path(output_file).with_suffix(".md")
-
     workflow = result["workflow"]
     summary = result["summary"]
     steps = result["steps"]
+    variables = result.get("variables", {})
+    target = variables.get("target", "unknown")
+    start = workflow.get("start_time", "")[:19].replace("T", " ")
+    end = workflow.get("end_time", "")[:19].replace("T", " ")
+    duration = workflow.get("duration", 0)
+    status_str = "✓ 成功" if summary["failed"] == 0 else "✗ 有失败"
+    L: list[str] = []
 
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(f"# {workflow['name']} - 执行报告\n\n")
-        f.write(f"**版本:** {workflow['version']}\n\n")
-        f.write(f"**开始时间:** {workflow['start_time']}\n\n")
-        f.write(f"**结束时间:** {workflow['end_time']}\n\n")
-        f.write(f"**耗时:** {workflow['duration']:.1f}秒\n\n")
-        f.write(f"**状态:** {workflow['status']}\n\n")
+    # 标题概要
+    L += [
+        "# 渗透测试扫描报告", "",
+        "| 项目 | 内容 |", "|---|---|",
+        f"| 目标 | `{target}` |",
+        f"| 开始时间 | {start} |",
+        f"| 结束时间 | {end} |",
+        f"| 总耗时 | {duration:.1f} 秒 |",
+        f"| 状态 | {status_str} |",
+        f"| 步骤 成功/失败/跳过 | {summary['successful']} / {summary['failed']} / {summary['skipped']} |",
+        "",
+    ]
 
-        f.write("## 摘要\n\n")
-        f.write(f"- 总步骤数: {summary['total_steps']}\n")
-        f.write(f"- 成功: {summary['successful']}\n")
-        f.write(f"- 失败: {summary['failed']}\n")
-        f.write(f"- 跳过: {summary['skipped']}\n\n")
+    # Nmap 结果
+    nmap_step = next((s for s in steps if s.get("id") == "port_scan"), None)
+    nmap_result = nmap_step.get("result") if nmap_step else None
+    L.append("## 端口扫描结果")
+    L.append("")
+    if nmap_result and isinstance(nmap_result, dict):
+        open_ports = nmap_result.get("open_ports", [])
+        services = nmap_result.get("services", [])
+        ports_str = ", ".join(str(p) for p in open_ports) if open_ports else "无"
+        L.append(f"**开放端口:** {ports_str}")
+        L.append("")
+        if services:
+            L += ["| 端口 | 协议 | 服务 | 版本信息 |", "|---:|---|---|---|"]
+            for svc in services:
+                port = svc.get('port', '-')
+                proto = svc.get('protocol', '-')
+                svc_name = svc.get('service', '-')
+                ver_str = f"{svc.get('product','')}"
+                ver_str2 = f"{svc.get('version','')}"
+                ver = f"{ver_str} {ver_str2}".strip() or '-'
+                L.append(f"| {port} | {proto} | {svc_name} | {ver} |")
+            L.append("")
+    else:
+        L += ["> 扫描失败或无结果", ""]
 
-        f.write("## 步骤详情\n\n")
-        for step in steps:
-            status_icon = {"success": "✓", "failed": "✗", "skipped": "⊘"}.get(
-                step["status"], "?"
-            )
-            f.write(f"### {status_icon} {step['name']}\n\n")
-            f.write(f"- **ID:** {step['id']}\n")
-            f.write(f"- **状态:** {step['status']}\n")
-            if step.get("duration"):
-                f.write(f"- **耗时:** {step['duration']:.1f}秒\n")
-            if step.get("error"):
-                f.write(f"- **错误:** {step['error']}\n")
-            f.write("\n")
+    # Web 目录爆破结果
+    ffuf_steps = [s for s in steps if s.get("id", "").startswith("ffuf_port_")]
+    executed_ffuf = [s for s in ffuf_steps if s.get("status") == "success"]
+    skipped_ffuf = [s for s in ffuf_steps if s.get("status") == "skipped"]
+    L += ["## Web 目录爆破结果", ""]
 
+    if not executed_ffuf:
+        L += ["> 未发现 Web 端口，跳过目录爆破", ""]
+    else:
+        for s in executed_ffuf:
+            step_result = s.get("result")
+            step_name = s.get("name", s.get("id", ""))
+            L.append(f"### {step_name}")
+            L.append("")
+            if not step_result or not isinstance(step_result, dict):
+                L += ["> 无结果数据", ""]
+                continue
+            entries = step_result.get("entries", [])
+            cmd = step_result.get("commandline", "")
+            scan_time = step_result.get("scan_time", "")
+            report_md = step_result.get("report_markdown", "")
+            if cmd:
+                L += [f"```", cmd, "```", ""]
+            if scan_time:
+                L += [f"扫描时间: `{scan_time}`", ""]
+            if not entries:
+                # Try to read raw stdout from result dir
+                result_dir = Path.home() / ".neosec" / "result" / target
+                step_id = s.get("id", "")
+                txt_file = result_dir / f"{step_id}.txt"
+                if txt_file.exists():
+                    L.append("```")
+                    L.append(txt_file.read_text(encoding="utf-8", errors="replace").rstrip())
+                    L.append("```")
+                    L.append("")
+                else:
+                    L += ["> 无命中结果", ""]
+                continue
+            status_counts: dict = {}
+            for e in entries:
+                sc = e.get("status")
+                if isinstance(sc, int):
+                    status_counts[sc] = status_counts.get(sc, 0) + 1
+            dist = "  ".join(f"`{code}` ×{cnt}" for code, cnt in sorted(status_counts.items()))
+            L.append(f"**命中:** {len(entries)} 条　**状态码:** {dist}")
+            L.append("")
+            L += ["| 路径 | 状态 | 大小(B) | 耗时(ms) | 重定向 |",
+                  "|---|---:|---:|---:|---|"]
+            for entry in entries:
+                path = str(entry.get('path', '/')).replace('|', '\\|')
+                redirect = str(entry.get('redirectlocation', ''))
+                sc2 = entry.get('status', '-')
+                badge = f"**{sc2}**" if sc2 in (200, 301, 302, 401) else str(sc2)
+                L.append(f"| `{path}` | {badge} | {entry.get('length','-')} "
+                         f"| {entry.get('duration_ms','-')} | {redirect} |")
+            L.append("")
+            if report_md and Path(report_md).exists():
+                L += [f"> 详细报告: `{report_md}`", ""]
+
+    if skipped_ffuf:
+        names = ", ".join(s.get("name", s.get("id", "")) for s in skipped_ffuf)
+        L += [f"> 已跳过（端口未开放）: {names}", ""]
+
+    # 执行步骤摘要
+    L += ["## 执行步骤", ""]
+    for step in steps:
+        if step.get("status") == "skipped":
+            continue
+        icon = {"success": "✓", "failed": "✗"}.get(step["status"], "?")
+        dur = f"{step['duration']:.1f}s" if step.get("duration") else "-"
+        L.append(f"- {icon} **{step['name']}** — {dur}")
+        if step.get("error") and step["status"] == "failed":
+            L.append(f"  - 错误: {step['error']}")
+    L.append("")
+
+    report_path.write_text("\n".join(L), encoding="utf-8")
     console.print(f"[green]✓[/green] Markdown 报告已生成: {report_path}")
-
 
 def _save_to_history(config: Config, result: dict):
     """保存到历史"""
